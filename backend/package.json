@@ -1,0 +1,28 @@
+{
+  "name": "il2cpp-deployment-backend",
+  "version": "1.0.0",
+  "description": "TypeScript backend for downloading libil2cpp binaries",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "node node_modules/typescript/lib/tsc.js",
+    "prestart": "npm run build",
+    "start": "node dist/server.js",
+    "dev": "nodemon --watch src --ext ts --exec ts-node src/server.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.3.4",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.11",
+    "@types/node": "^20.12.12",
+    "nodemon": "^3.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
