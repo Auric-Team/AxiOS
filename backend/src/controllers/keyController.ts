@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import Key from '../models/Key';
+import User from '../models/User';
 import { dbLog } from '../models/Log';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 
@@ -184,3 +185,68 @@ export async function toggleKeyStatus(req: AuthenticatedRequest, res: Response) 
     res.status(500).json({ error: 'Failed to toggle access key status.' });
   }
 }
+
+/**
+ * Admin-only: Deactivate all keys.
+ */
+export async function deactivateAllKeys(req: AuthenticatedRequest, res: Response) {
+  try {
+    const result = await Key.updateMany({}, { isActive: false });
+    await dbLog('warn', 'key', `Deactivated all access keys. Count: ${result.modifiedCount} (Admin: ${req.user?.username})`);
+    res.json({ success: true, message: `Successfully deactivated all ${result.modifiedCount} keys.` });
+  } catch (e: any) {
+    res.status(500).json({ error: 'Failed to deactivate all keys.' });
+  }
+}
+
+/**
+ * Admin-only: Delete all inactive or expired keys.
+ */
+export async function pruneKeys(req: AuthenticatedRequest, res: Response) {
+  try {
+    const now = new Date();
+    const result = await Key.deleteMany({
+      $or: [
+        { isActive: false },
+        { expiresAt: { $lt: now } }
+      ]
+    });
+    await dbLog('info', 'key', `Pruned inactive/expired keys. Deleted count: ${result.deletedCount} (Admin: ${req.user?.username})`);
+    res.json({ success: true, message: `Successfully pruned ${result.deletedCount} inactive/expired keys.` });
+  } catch (e: any) {
+    res.status(500).json({ error: 'Failed to prune access keys.' });
+  }
+}
+
+/**
+ * Admin-only: Reset device fingerprint binding on a key.
+ */
+export async function resetFingerprint(req: AuthenticatedRequest, res: Response) {
+  try {
+    const { keyId } = req.params;
+    const keyDoc = await Key.findById(keyId);
+    if (!keyDoc) {
+      return res.status(404).json({ error: 'Access key not found.' });
+    }
+
+    keyDoc.deviceFingerprint = '';
+    await keyDoc.save();
+
+    // If key is assigned to an operator, automatically clear the operator's bound device fingerprint too
+    if (keyDoc.assignedTo) {
+      const cleanUsername = keyDoc.assignedTo.trim();
+      const escapedUsername = cleanUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      await User.updateOne(
+        { username: { $regex: new RegExp(`^${escapedUsername}$`, 'i') } },
+        { deviceFingerprint: '' }
+      );
+      await dbLog('info', 'key', `Also reset device fingerprint binding for associated operator: ${cleanUsername}`, req.ip);
+    }
+
+    await dbLog('info', 'key', `Reset fingerprint binding for key: ${keyDoc.key} (Admin: ${req.user?.username})`);
+    res.json({ success: true, message: 'Device fingerprint bound reset successfully.', key: keyDoc });
+  } catch (e: any) {
+    res.status(500).json({ error: 'Failed to reset device fingerprint.' });
+  }
+}
+

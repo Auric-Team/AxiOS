@@ -22,37 +22,73 @@ class CyberCard extends StatelessWidget {
       width: width,
       height: height,
       decoration: BoxDecoration(
-        color: const Color(0x660F1420),
+        color: const Color(0x990A0E17), // Glassmorphic translucent dark background
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: (borderGlowColors.first).withAlpha((255 * 0.08).round()),
-            blurRadius: 16,
-            spreadRadius: 2,
+            color: (borderGlowColors.first).withAlpha((255 * 0.12).round()),
+            blurRadius: 24,
+            spreadRadius: 1,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: borderGlowColors.length > 1 ? Colors.transparent : borderGlowColors.first,
-              width: 1.5,
-            ),
-            gradient: borderGlowColors.length > 1
-                ? LinearGradient(
-                    colors: borderGlowColors,
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  )
-                : null,
+      child: CustomPaint(
+        painter: _GradientBorderPainter(
+          gradient: LinearGradient(
+            colors: borderGlowColors,
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
-          padding: padding ?? const EdgeInsets.all(20),
-          child: child,
+          strokeWidth: 1.5,
+          borderRadius: 20,
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(20),
+          child: Padding(
+            padding: padding ?? const EdgeInsets.all(22),
+            child: child,
+          ),
         ),
       ),
     );
+  }
+}
+
+class _GradientBorderPainter extends CustomPainter {
+  final Gradient gradient;
+  final double strokeWidth;
+  final double borderRadius;
+
+  _GradientBorderPainter({
+    required this.gradient,
+    required this.strokeWidth,
+    required this.borderRadius,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Rect rect = Offset.zero & size;
+    final RRect outerRRect = RRect.fromRectAndRadius(
+      rect,
+      Radius.circular(borderRadius),
+    );
+    final RRect innerRRect = RRect.fromRectAndRadius(
+      rect.deflate(strokeWidth),
+      Radius.circular(borderRadius - strokeWidth),
+    );
+
+    final Paint paint = Paint()
+      ..shader = gradient.createShader(rect)
+      ..style = PaintingStyle.fill;
+
+    canvas.drawDRRect(outerRRect, innerRRect, paint);
+  }
+
+  @override
+  bool shouldRepaint(_GradientBorderPainter oldDelegate) {
+    return oldDelegate.gradient != gradient ||
+        oldDelegate.strokeWidth != strokeWidth ||
+        oldDelegate.borderRadius != borderRadius;
   }
 }

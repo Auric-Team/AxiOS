@@ -48,11 +48,9 @@ class _CyberButtonState extends State<CyberButton> with SingleTickerProviderStat
   Widget build(BuildContext context) {
     return GestureDetector(
       onTapDown: (_) => _animController.forward(),
-      onTapUp: (_) {
-        _animController.reverse();
-        widget.onPressed();
-      },
+      onTapUp: (_) => _animController.reverse(),
       onTapCancel: () => _animController.reverse(),
+      onTap: widget.onPressed,
       child: ScaleTransition(
         scale: _scaleAnimation,
         child: Container(

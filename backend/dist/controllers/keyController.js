@@ -8,8 +8,12 @@ exports.generateKeys = generateKeys;
 exports.getAllKeys = getAllKeys;
 exports.deleteKey = deleteKey;
 exports.toggleKeyStatus = toggleKeyStatus;
+exports.deactivateAllKeys = deactivateAllKeys;
+exports.pruneKeys = pruneKeys;
+exports.resetFingerprint = resetFingerprint;
 const crypto_1 = __importDefault(require("crypto"));
 const Key_1 = __importDefault(require("../models/Key"));
+const User_1 = __importDefault(require("../models/User"));
 const Log_1 = require("../models/Log");
 /**
  * Validates an access key. If valid, increments the usage count.
@@ -169,5 +173,63 @@ async function toggleKeyStatus(req, res) {
     }
     catch (e) {
         res.status(500).json({ error: 'Failed to toggle access key status.' });
+    }
+}
+/**
+ * Admin-only: Deactivate all keys.
+ */
+async function deactivateAllKeys(req, res) {
+    try {
+        const result = await Key_1.default.updateMany({}, { isActive: false });
+        await (0, Log_1.dbLog)('warn', 'key', `Deactivated all access keys. Count: ${result.modifiedCount} (Admin: ${req.user?.username})`);
+        res.json({ success: true, message: `Successfully deactivated all ${result.modifiedCount} keys.` });
+    }
+    catch (e) {
+        res.status(500).json({ error: 'Failed to deactivate all keys.' });
+    }
+}
+/**
+ * Admin-only: Delete all inactive or expired keys.
+ */
+async function pruneKeys(req, res) {
+    try {
+        const now = new Date();
+        const result = await Key_1.default.deleteMany({
+            $or: [
+                { isActive: false },
+                { expiresAt: { $lt: now } }
+            ]
+        });
+        await (0, Log_1.dbLog)('info', 'key', `Pruned inactive/expired keys. Deleted count: ${result.deletedCount} (Admin: ${req.user?.username})`);
+        res.json({ success: true, message: `Successfully pruned ${result.deletedCount} inactive/expired keys.` });
+    }
+    catch (e) {
+        res.status(500).json({ error: 'Failed to prune access keys.' });
+    }
+}
+/**
+ * Admin-only: Reset device fingerprint binding on a key.
+ */
+async function resetFingerprint(req, res) {
+    try {
+        const { keyId } = req.params;
+        const keyDoc = await Key_1.default.findById(keyId);
+        if (!keyDoc) {
+            return res.status(404).json({ error: 'Access key not found.' });
+        }
+        keyDoc.deviceFingerprint = '';
+        await keyDoc.save();
+        // If key is assigned to an operator, automatically clear the operator's bound device fingerprint too
+        if (keyDoc.assignedTo) {
+            const cleanUsername = keyDoc.assignedTo.trim();
+            const escapedUsername = cleanUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            await User_1.default.updateOne({ username: { $regex: new RegExp(`^${escapedUsername}$`, 'i') } }, { deviceFingerprint: '' });
+            await (0, Log_1.dbLog)('info', 'key', `Also reset device fingerprint binding for associated operator: ${cleanUsername}`, req.ip);
+        }
+        await (0, Log_1.dbLog)('info', 'key', `Reset fingerprint binding for key: ${keyDoc.key} (Admin: ${req.user?.username})`);
+        res.json({ success: true, message: 'Device fingerprint bound reset successfully.', key: keyDoc });
+    }
+    catch (e) {
+        res.status(500).json({ error: 'Failed to reset device fingerprint.' });
     }
 }

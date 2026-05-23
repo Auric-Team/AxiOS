@@ -3,6 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import mongoose from 'mongoose';
 import config from '../config';
+import Key from '../models/Key';
+import { dbLog } from '../models/Log';
+
+import { getSystemInfo } from '../utils/system';
 
 const defaultLibil2cppPath = path.join(config.uploadDir, 'libil2cpp.so');
 
@@ -20,6 +24,7 @@ export function getStatus(req: Request, res: Response) {
       logLevel: config.logLevel,
       dbStatus: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
     },
+    system: getSystemInfo(),
     binaryExists: exists,
     binarySize: exists ? fs.statSync(defaultLibil2cppPath).size : 0,
     timestamp: new Date().toISOString()
@@ -28,24 +33,89 @@ export function getStatus(req: Request, res: Response) {
 
 /**
  * Streams the libil2cpp.so binary file to the requesting client.
+ * Requires validation of key, username, and deviceFingerprint.
  */
-export function downloadBinary(req: Request, res: Response) {
-  if (!fs.existsSync(defaultLibil2cppPath)) {
-    if (config.logLevel !== 'error') {
-      console.warn(`[Warning] Download requested but binary not found: ${defaultLibil2cppPath}`);
+export async function downloadBinary(req: Request, res: Response) {
+  const ip = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+  const deviceInfo = req.headers['x-device-info'] as string || 'Unknown Device';
+
+  try {
+    const { key, username, deviceFingerprint } = req.query;
+
+    if (!key) {
+      await dbLog('warn', 'download', 'Download rejected: License key parameter missing.', ip, deviceInfo);
+      return res.status(400).json({ error: 'License key is required to stream secure payload.' });
     }
-    return res.status(404).json({ error: 'libil2cpp.so binary not found on server.' });
+
+    const keyDoc = await Key.findOne({ key: (key as string).trim() });
+    if (!keyDoc) {
+      await dbLog('warn', 'download', `Download rejected: Key not found: ${key}`, ip, deviceInfo);
+      return res.status(404).json({ error: 'Invalid access key. Key does not exist.' });
+    }
+
+    if (!keyDoc.isActive) {
+      await dbLog('warn', 'download', `Download rejected: Key is deactivated: ${key}`, ip, deviceInfo);
+      return res.status(403).json({ error: 'Access key is deactivated.' });
+    }
+
+    // Expiry Check
+    if (keyDoc.expiresAt && keyDoc.expiresAt < new Date()) {
+      await dbLog('warn', 'download', `Download rejected: Key has expired: ${key}`, ip, deviceInfo);
+      return res.status(403).json({ error: 'Access key is outdated/expired. Please contact an administrator.' });
+    }
+
+    // Device Fingerprint Binding for the key
+    let incomingFP = ((deviceFingerprint as string) || '').trim();
+    if (!incomingFP) {
+      const salt = username ? (username as string).trim() : (key as string).trim();
+      incomingFP = 'AXIOS-FP-BACKEND-FALLBACK-' + Buffer.from(salt).toString('hex').toUpperCase();
+    }
+
+    if (!keyDoc.deviceFingerprint) {
+      keyDoc.deviceFingerprint = incomingFP;
+      await keyDoc.save();
+      await dbLog('info', 'download', `Access key ${key} bound to device fingerprint during download: ${incomingFP}`, ip, deviceInfo);
+    } else if (keyDoc.deviceFingerprint !== incomingFP) {
+      await dbLog('warn', 'download', `Download rejected: Key bound to device ${keyDoc.deviceFingerprint}, attempted by device ${incomingFP}`, ip, deviceInfo);
+      return res.status(403).json({ error: 'Access key is bound to another security device.' });
+    }
+
+    // Ownership Check
+    const activeUser = ((username as string) || '').trim();
+    if (keyDoc.assignedTo && keyDoc.assignedTo.toLowerCase() !== activeUser.toLowerCase()) {
+      await dbLog('warn', 'download', `Download rejected: Key belongs to ${keyDoc.assignedTo}, attempted by ${activeUser}: ${key}`, ip, deviceInfo);
+      return res.status(403).json({ error: 'Access key is assigned to another security account.' });
+    }
+
+    // Limit Check
+    const isOwner = keyDoc.assignedTo && keyDoc.assignedTo.toLowerCase() === activeUser.toLowerCase();
+    if (!isOwner && keyDoc.usesCount >= keyDoc.maxUses) {
+      await dbLog('warn', 'download', `Download rejected: Key exceeded max uses (${keyDoc.maxUses}): ${key}`, ip, deviceInfo);
+      return res.status(403).json({ error: 'Access key usage limit exceeded.' });
+    }
+
+    if (!fs.existsSync(defaultLibil2cppPath)) {
+      await dbLog('error', 'download', `Download failed: binary file not found on disk: ${defaultLibil2cppPath}`, ip, deviceInfo);
+      return res.status(404).json({ error: 'libil2cpp.so binary not found on server.' });
+    }
+
+    if (config.logLevel === 'debug' || config.logLevel === 'info') {
+      console.log(`[Download] Streaming secure libil2cpp.so for key ${keyDoc.key} to client IP: ${ip}`);
+    }
+
+    // Log the successful download
+    await dbLog('info', 'download', `Streaming libil2cpp.so payload for key: ${keyDoc.key} (User: ${keyDoc.assignedTo || 'Anonymous'})`, ip, deviceInfo);
+
+    const stats = fs.statSync(defaultLibil2cppPath);
+    res.setHeader('Content-Length', stats.size.toString());
+    res.setHeader('Content-Disposition', 'attachment; filename=libil2cpp.so');
+    res.setHeader('Content-Type', 'application/octet-stream');
+
+    return res.sendFile(path.resolve(defaultLibil2cppPath));
+  } catch (err: any) {
+    console.error('[Download] Exception:', err);
+    return res.status(500).json({ error: `Internal Server Error during download: ${err.message || err}` });
   }
-
-  if (config.logLevel === 'debug' || config.logLevel === 'info') {
-    console.log(`[Download] Streaming libil2cpp.so to client IP: ${req.ip}`);
-  }
-
-  res.setHeader('Content-Disposition', 'attachment; filename=libil2cpp.so');
-  res.setHeader('Content-Type', 'application/octet-stream');
-
-  const fileStream = fs.createReadStream(defaultLibil2cppPath);
-  fileStream.pipe(res);
 }
 
 /**

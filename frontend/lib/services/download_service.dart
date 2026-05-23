@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shizuku_api/shizuku_api.dart';
 import 'config_service.dart';
 
 class DownloadService {
@@ -21,16 +22,31 @@ class DownloadService {
   Future<bool> downloadAndDeploy({
     required String backendUrl,
     required String targetPath,
-    required Function(double progress) onProgress,
+    required String key,
+    required String username,
+    required Function(double progress, String speed, String eta, String sizeInfo) onProgress,
     required Function(String log) onLog,
   }) async {
     try {
       final cleanUrl = _sanitizeUrl(backendUrl);
-      final String downloadEndpoint = '$cleanUrl/api/download/libil2cpp';
+      final String downloadEndpoint = '$cleanUrl/api/download/libil2cpp'
+          '?key=${Uri.encodeComponent(key)}'
+          '&username=${Uri.encodeComponent(username)}'
+          '&deviceFingerprint=${Uri.encodeComponent(ConfigService().deviceFingerprint)}';
       onLog('Initializing download from endpoint: $downloadEndpoint');
 
-      // Resolve a safe temporary file location
-      final Directory tempDir = await getTemporaryDirectory();
+      // Resolve a safe temporary file location (external for Android to allow Shizuku shell user to access it)
+      Directory tempDir = await getTemporaryDirectory();
+      if (Platform.isAndroid) {
+        try {
+          final List<Directory>? extCacheDirs = await getExternalCacheDirectories();
+          if (extCacheDirs != null && extCacheDirs.isNotEmpty) {
+            tempDir = extCacheDirs.first;
+          }
+        } catch (_) {
+          // Fall back to standard temp dir if external cache is unavailable
+        }
+      }
       final String tempFilePath = '${tempDir.path}/libil2cpp_downloading.so';
       final File tempFile = File(tempFilePath);
       if (await tempFile.exists()) {
@@ -40,18 +56,47 @@ class DownloadService {
       onLog('Created temporary download file at: $tempFilePath');
       onLog('Connecting to backend...');
 
+      final int startTime = DateTime.now().millisecondsSinceEpoch;
+
       final Response response = await _dio.download(
-        downloadEndpoint,
-        tempFilePath,
-        onReceiveProgress: (received, total) {
-          if (total != -1) {
-            final double progress = received / total;
-            onProgress(progress);
-          } else {
-            onProgress(0.0);
-          }
-        },
-      );
+         downloadEndpoint,
+         tempFilePath,
+         onReceiveProgress: (received, total) {
+           if (total != -1 && total > 0) {
+             final double progress = received / total;
+             final int now = DateTime.now().millisecondsSinceEpoch;
+             final int totalElapsedMs = now - startTime;
+             
+             // Speed calculation (over the last time interval to keep it smooth)
+             double speedBps = 0.0;
+             if (totalElapsedMs > 0) {
+               speedBps = (received / totalElapsedMs) * 1000; // Bytes per second
+             }
+             
+             final double speedMbps = speedBps / (1024 * 1024);
+             final String speedStr = '${speedMbps.toStringAsFixed(2)} MB/s';
+             
+             // ETA calculation
+             String etaStr = '--:--';
+             if (speedBps > 0) {
+               final double remainingBytes = (total - received).toDouble();
+               final double remainingSeconds = remainingBytes / speedBps;
+               if (remainingSeconds < 60) {
+                 etaStr = '${remainingSeconds.toStringAsFixed(0)}s';
+               } else {
+                 final int minutes = (remainingSeconds / 60).floor();
+                 final int seconds = (remainingSeconds % 60).round();
+                 etaStr = '${minutes}m ${seconds}s';
+               }
+             }
+             
+             final String sizeInfo = '${(received / (1024 * 1024)).toStringAsFixed(1)} MB / ${(total / (1024 * 1024)).toStringAsFixed(1)} MB';
+             onProgress(progress, speedStr, etaStr, sizeInfo);
+           } else {
+             onProgress(0.0, '0.00 MB/s', '--:--', '0 MB / 0 MB');
+           }
+         },
+       );
 
       if (response.statusCode != 200) {
         onLog('Error: Server returned status code ${response.statusCode}');
@@ -88,7 +133,7 @@ class DownloadService {
         copySuccess = true;
       } catch (e) {
         onLog('Standard file copy failed due to Android permission restrictions. Attempting root fallback...');
-        copySuccess = await _copyAsRoot(tempFilePath, finalFilePath);
+        copySuccess = await _copyAsRoot(tempFilePath, finalFilePath, onLog: onLog);
         if (!copySuccess) {
           onLog('Root copy fallback failed or root access is not available.');
           rethrow;
@@ -228,24 +273,83 @@ class DownloadService {
     return {'success': false, 'error': 'Invalid Token Session.'};
   }
 
-  /// Copies a file using root command permissions (`su`).
-  Future<bool> _copyAsRoot(String sourcePath, String destPath) async {
+  /// Copies a file using root command permissions (`su`) or Shizuku fallback.
+  Future<bool> _copyAsRoot(String sourcePath, String destPath, {required Function(String log) onLog}) async {
+    // 1. Try standard su root execution first
     try {
-      // 1. Create target directory recursively via root
       final targetDirectory = destPath.substring(0, destPath.lastIndexOf('/'));
+      onLog('Root fallback: Attempting to mkdir -p "$targetDirectory" via su');
       final mkdirResult = await Process.run('su', ['-c', 'mkdir -p "$targetDirectory"']);
-      if (mkdirResult.exitCode != 0) {
-        return false;
+      if (mkdirResult.exitCode == 0) {
+        onLog('Root fallback: su mkdir successful. Copying payload...');
+        final cpResult = await Process.run('su', ['-c', 'cp "$sourcePath" "$destPath"']);
+        if (cpResult.exitCode == 0) {
+          onLog('Root fallback: su cp successful. Adjusting permissions...');
+          await Process.run('su', ['-c', 'chmod 644 "$destPath"']);
+          return true;
+        } else {
+          onLog('Root fallback: su cp failed (exit code ${cpResult.exitCode}): ${cpResult.stderr}');
+        }
+      } else {
+        onLog('Root fallback: su mkdir failed (exit code ${mkdirResult.exitCode}): ${mkdirResult.stderr}');
       }
+    } catch (e) {
+      onLog('Root fallback: su execution failed: $e');
+    }
 
-      // 2. Perform the copy operation via root cp
-      final cpResult = await Process.run('su', ['-c', 'cp "$sourcePath" "$destPath"']);
-      if (cpResult.exitCode == 0) {
-        // 3. Set standard readable permissions
-        await Process.run('su', ['-c', 'chmod 644 "$destPath"']);
-        return true;
+    // 2. Try Shizuku fallback on non-rooted devices
+    try {
+      final shizuku = ShizukuApi();
+      onLog('Shizuku fallback: Checking if Shizuku binder is running...');
+      final isRunning = await shizuku.pingBinder() ?? false;
+      if (isRunning) {
+        onLog('Shizuku fallback: Shizuku binder is active. Checking permission...');
+        var hasPermission = await shizuku.checkPermission() ?? false;
+        if (!hasPermission) {
+          onLog('Shizuku fallback: Requesting Shizuku authorization...');
+          hasPermission = await shizuku.requestPermission() ?? false;
+        }
+        if (hasPermission) {
+          onLog('Shizuku fallback: Shizuku permission granted.');
+          final targetDirectory = destPath.substring(0, destPath.lastIndexOf('/'));
+          
+          onLog('Shizuku fallback: Creating target directory...');
+          final mkdirOut = await shizuku.runCommand('mkdir -p "$targetDirectory"');
+          if (mkdirOut != null && mkdirOut.isNotEmpty) {
+            onLog('Shizuku fallback: mkdir output: $mkdirOut');
+          }
+
+          onLog('Shizuku fallback: Copying payload from $sourcePath to $destPath...');
+          final cpOut = await shizuku.runCommand('cp "$sourcePath" "$destPath"');
+          if (cpOut != null && cpOut.isNotEmpty) {
+            onLog('Shizuku fallback: cp output: $cpOut');
+          }
+
+          onLog('Shizuku fallback: Adjusting file permissions to 644...');
+          final chmodOut = await shizuku.runCommand('chmod 644 "$destPath"');
+          if (chmodOut != null && chmodOut.isNotEmpty) {
+            onLog('Shizuku fallback: chmod output: $chmodOut');
+          }
+
+          // Verify file exists in destination path using Shizuku
+          final checkResult = await shizuku.runCommand('[ -f "$destPath" ] && echo "exists"');
+          onLog('Shizuku fallback: Check path existence output: $checkResult');
+          if (checkResult != null && checkResult.contains('exists')) {
+            onLog('Shizuku fallback: Success! File exists at destination.');
+            return true;
+          } else {
+            onLog('Shizuku fallback: Error! File does not exist at destination after copy.');
+          }
+        } else {
+          onLog('Shizuku fallback: Shizuku permission was denied by the user.');
+        }
+      } else {
+        onLog('Shizuku fallback: Shizuku binder service is not running.');
       }
-    } catch (_) {}
+    } catch (e) {
+      onLog('Shizuku fallback: Exception during Shizuku command execution: $e');
+    }
+
     return false;
   }
 }
