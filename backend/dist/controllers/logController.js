@@ -7,21 +7,46 @@ exports.getLogs = getLogs;
 exports.clearLogs = clearLogs;
 const Log_1 = __importDefault(require("../models/Log"));
 /**
- * Admin-only: Fetch system logs with optional filtering.
+ * Admin-only: Fetch system logs with pagination and search filtering.
  */
 async function getLogs(req, res) {
     try {
-        const { level, category, limit } = req.query;
+        const { level, category, page, limit, search } = req.query;
         const filter = {};
-        if (level)
+        if (level && level !== 'ALL') {
             filter.level = level;
-        if (category)
+        }
+        if (category && category !== 'ALL') {
             filter.category = category;
-        const limitVal = parseInt(limit || '100', 10);
+        }
+        if (search) {
+            const searchStr = search.trim();
+            const escapedSearch = searchStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const searchRegex = new RegExp(escapedSearch, 'i');
+            filter.$or = [
+                { message: searchRegex },
+                { ip: searchRegex },
+                { deviceInfo: searchRegex }
+            ];
+        }
+        const pageVal = parseInt(page || '1', 10);
+        const limitVal = parseInt(limit || '50', 10);
+        const skipVal = (pageVal - 1) * limitVal;
+        const total = await Log_1.default.countDocuments(filter);
         const logs = await Log_1.default.find(filter)
             .sort({ timestamp: -1 })
+            .skip(skipVal)
             .limit(limitVal);
-        res.json({ success: true, logs });
+        res.json({
+            success: true,
+            logs,
+            pagination: {
+                total,
+                page: pageVal,
+                limit: limitVal,
+                pages: Math.ceil(total / limitVal)
+            }
+        });
     }
     catch (e) {
         res.status(500).json({ error: 'Failed to fetch logs.' });

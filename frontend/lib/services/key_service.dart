@@ -69,4 +69,45 @@ class KeyService {
     }
     return {'success': false, 'error': 'Failed to verify key.'};
   }
+
+  /// Admin-only: Updates an access key's properties.
+  Future<Map<String, dynamic>> updateKey({
+    required String backendUrl,
+    required String token,
+    required String keyId,
+    int? maxUses,
+    String? expiresAt,
+    String? targetGame,
+    String? assignedTo,
+  }) async {
+    try {
+      final cleanUrl = _sanitizeUrl(backendUrl);
+      
+      final Map<String, dynamic> data = {};
+      if (maxUses != null) data['maxUses'] = maxUses;
+      if (expiresAt != null) data['expiresAt'] = expiresAt;
+      if (targetGame != null) data['targetGame'] = targetGame;
+      if (assignedTo != null) data['assignedTo'] = assignedTo;
+
+      final response = await _dio.patch(
+        '$cleanUrl/api/keys/$keyId',
+        data: data,
+        options: Options(
+          headers: {'Authorization': 'Bearer $token'},
+        ),
+      );
+
+      if (response.statusCode == 200) {
+        return {'success': true, 'message': response.data['message'] ?? 'Key updated.'};
+      }
+    } on DioException catch (e) {
+      final errorMsg = e.response?.data != null && e.response?.data['error'] != null
+          ? e.response?.data['error']
+          : 'Failed to update access key.';
+      return {'success': false, 'error': errorMsg};
+    } catch (e) {
+      return {'success': false, 'error': e.toString()};
+    }
+    return {'success': false, 'error': 'Unknown update error.'};
+  }
 }

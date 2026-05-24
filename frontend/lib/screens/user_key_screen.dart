@@ -1,16 +1,23 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:shizuku_api/shizuku_api.dart';
 import '../services/config_service.dart';
 import '../services/download_service.dart';
 import '../services/key_service.dart';
 import '../services/detection_service.dart';
 import '../services/launcher_service.dart';
-import '../widgets/cyber_card.dart';
-import '../widgets/cyber_button.dart';
-import '../widgets/cyber_text_field.dart';
-import '../widgets/cyber_console.dart';
-import '../widgets/pulse_indicator.dart';
+import '../services/preset_service.dart';
+import '../widgets/common/cyber_card.dart';
+import '../widgets/common/cyber_button.dart';
+import '../widgets/common/cyber_text_field.dart';
+import '../widgets/dashboard/cyber_console.dart';
+import '../widgets/common/pulse_indicator.dart';
+import '../widgets/dashboard/system_hud_sheet.dart';
+import '../widgets/dashboard/latency_sparkline.dart';
 import '../models/system_status.dart';
+import '../config.dart';
 import 'auth_screen.dart';
 
 class UserKeyScreen extends StatefulWidget {
@@ -26,6 +33,7 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
   final DownloadService _downloadService = DownloadService();
   final DetectionService _detectionService = DetectionService();
   final LauncherService _launcherService = LauncherService();
+  final PresetService _presetService = PresetService();
 
   bool _isValidating = false;
   bool _isDeploying = false;
@@ -37,8 +45,18 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
   final List<String> _consoleLogs = [];
   bool _showConsoleLogs = true;
 
+  // Presets and Diagnostics State
+  List<PresetGame> _activePresets = [];
+  bool _loadingPresets = false;
+  bool _rootAvailable = false;
+  String _shizukuStatus = 'UNKNOWN'; // RUNNING, NOT_RUNNING, NO_PERMISSION, UNKNOWN
+  String _deviceArch = 'UNKNOWN';
+  Map<String, bool> _installedPresets = {}; 
+  bool _isRunningDiagnostics = false;
+
   // Connection Diagnostics Status
   int? _serverLatencyMs;
+  final List<double> _latencyHistory = [];
   bool _isCheckingLatency = false;
   SystemStatus? _serverStatus;
 
@@ -53,6 +71,230 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
   void initState() {
     super.initState();
     _measureLatency();
+    _loadPresetsAndDiagnostics();
+  }
+
+  @override
+  void dispose() {
+    _keyController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPresetsAndDiagnostics() async {
+    setState(() {
+      _loadingPresets = true;
+    });
+    final config = ConfigService();
+    final list = await _presetService.getPresets(
+      backendUrl: config.backendUrl,
+      token: config.token ?? '',
+    );
+    if (mounted) {
+      setState(() {
+        _activePresets = list.isNotEmpty ? list : config.presets;
+        _loadingPresets = false;
+      });
+      _runSystemDiagnostics(_activePresets);
+    }
+  }
+
+  Future<void> _runSystemDiagnostics(List<PresetGame> currentPresets) async {
+    if (_isRunningDiagnostics) return;
+    setState(() {
+      _isRunningDiagnostics = true;
+    });
+
+    _addLog('Initiating hardware & environment diagnostics...');
+
+    // 1. Check Architecture
+    try {
+      if (Platform.isAndroid) {
+        final androidInfo = await DeviceInfoPlugin().androidInfo;
+        setState(() {
+          _deviceArch = androidInfo.supportedAbis.isNotEmpty 
+              ? androidInfo.supportedAbis.first.toUpperCase()
+              : 'UNKNOWN';
+        });
+      } else {
+        setState(() {
+          _deviceArch = 'MOCK_X86_64';
+        });
+      }
+    } catch (_) {
+      setState(() {
+        _deviceArch = 'ERR_ARCH';
+      });
+    }
+
+    // 2. Check Root Access
+    try {
+      if (Platform.isAndroid) {
+        final suCheck = await Process.run('su', ['-v']).timeout(
+          const Duration(seconds: 1),
+          onTimeout: () => ProcessResult(-1, -1, '', 'Timeout'),
+        );
+        setState(() {
+          _rootAvailable = suCheck.exitCode == 0;
+        });
+      } else {
+        setState(() {
+          _rootAvailable = false;
+        });
+      }
+    } catch (_) {
+      setState(() {
+        _rootAvailable = false;
+      });
+    }
+
+    // 3. Check Shizuku Service status
+    try {
+      if (Platform.isAndroid) {
+        final shizuku = ShizukuApi();
+        final isRunning = await shizuku.pingBinder() ?? false;
+        if (isRunning) {
+          var hasPermission = await shizuku.checkPermission() ?? false;
+          if (!hasPermission) {
+            _addLog('Shizuku active but unauthorized. Prompting user for permission...');
+            hasPermission = await shizuku.requestPermission() ?? false;
+          }
+          setState(() {
+            _shizukuStatus = hasPermission ? 'RUNNING' : 'NO_PERMISSION';
+          });
+        } else {
+          setState(() {
+            _shizukuStatus = 'NOT_RUNNING';
+          });
+        }
+      } else {
+        setState(() {
+          _shizukuStatus = 'RUNNING'; // mock
+        });
+      }
+    } catch (_) {
+      setState(() {
+        _shizukuStatus = 'UNAVAILABLE';
+      });
+    }
+
+    // 4. Check Installed Targets
+    final Map<String, bool> tempInstalled = {};
+    for (var preset in currentPresets) {
+      try {
+        if (Platform.isAndroid) {
+          final dir = Directory('/storage/emulated/0/Android/data/${preset.package}');
+          final exists = await dir.exists();
+          tempInstalled[preset.package] = exists;
+        } else {
+          tempInstalled[preset.package] = true; // mock
+        }
+      } catch (_) {
+        tempInstalled[preset.package] = false;
+      }
+    }
+    
+    if (mounted) {
+      setState(() {
+        _installedPresets = tempInstalled;
+        _isRunningDiagnostics = false;
+      });
+    }
+
+    _addLog('Diagnostics complete. Arch: $_deviceArch, Root: ${_rootAvailable ? "YES" : "NO"}, Shizuku: $_shizukuStatus');
+  }
+
+  void _showSnackBar(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? const Color(0xFFFF2A6D) : const Color(0xFF00FFCC),
+      ),
+    );
+  }
+
+  Future<void> _handleShizukuBadgeTap() async {
+    if (_shizukuStatus == 'RUNNING') {
+      _showSnackBar('Shizuku is active and authorized.');
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF0A0E17),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: const BorderSide(color: Color(0xFFBD00FF), width: 1.5),
+          ),
+          title: const Text(
+            'SHIZUKU INTERFACE SETUP',
+            style: TextStyle(
+              color: Color(0xFF00FFCC),
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+              fontFamily: 'monospace',
+              letterSpacing: 1.0,
+            ),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Current Status: ${_shizukuStatus.toUpperCase()}',
+                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Instructions:\n'
+                '1. Ensure Shizuku Manager is installed and started.\n'
+                '2. If status is "NO AUTH", tap "REQUEST PERMISSION" or authorize this app manually inside Shizuku Manager.\n'
+                '3. On some devices (MIUI/HyperOS/Realme), you must enable "Disable permission monitoring" in Developer Options.',
+                style: TextStyle(color: Colors.white70, fontSize: 11, height: 1.4),
+              ),
+              const SizedBox(height: 16),
+              CyberButton(
+                text: 'REQUEST PERMISSION',
+                height: 38,
+                onPressed: () async {
+                  Navigator.pop(context);
+                  final shizuku = ShizukuApi();
+                  final success = await shizuku.requestPermission() ?? false;
+                  if (success) {
+                    _loadPresetsAndDiagnostics();
+                  } else {
+                    _showSnackBar('Permission request failed or denied.', isError: true);
+                  }
+                },
+                gradientColors: const [Color(0xFF00FFCC), Color(0xFFBD00FF)],
+              ),
+              const SizedBox(height: 8),
+              CyberButton(
+                text: 'LAUNCH SHIZUKU MANAGER',
+                height: 38,
+                onPressed: () async {
+                  Navigator.pop(context);
+                  final success = await LauncherService().launchApp('moe.shizuku.manager');
+                  if (!success) {
+                    _showSnackBar('Could not launch Shizuku. Is it installed?', isError: true);
+                  }
+                },
+                gradientColors: const [Color(0xFF0F172A), Color(0xFF1E293B)],
+                textColor: Colors.white70,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('CLOSE', style: TextStyle(color: Colors.grey, fontSize: 11)),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _measureLatency() async {
@@ -69,11 +311,15 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
         setState(() {
           _serverLatencyMs = endTime - startTime;
           _serverStatus = SystemStatus.fromJson(statusJson);
+          _latencyHistory.add(_serverLatencyMs!.toDouble());
+          if (_latencyHistory.length > 10) _latencyHistory.removeAt(0);
         });
       } else if (mounted) {
         setState(() {
           _serverLatencyMs = null;
           _serverStatus = null;
+          _latencyHistory.add(0.0);
+          if (_latencyHistory.length > 10) _latencyHistory.removeAt(0);
         });
       }
     } catch (_) {
@@ -81,6 +327,8 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
         setState(() {
           _serverLatencyMs = null;
           _serverStatus = null;
+          _latencyHistory.add(0.0);
+          if (_latencyHistory.length > 10) _latencyHistory.removeAt(0);
         });
       }
     } finally {
@@ -358,6 +606,233 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
     );
   }
 
+  Widget _buildDiagnosticsCard() {
+    Color shizukuColor;
+    String shizukuText;
+    switch (_shizukuStatus) {
+      case 'RUNNING':
+        shizukuColor = const Color(0xFF00FFCC);
+        shizukuText = 'RUNNING';
+        break;
+      case 'NO_PERMISSION':
+        shizukuColor = const Color(0xFFFFCC00);
+        shizukuText = 'NO AUTH';
+        break;
+      case 'NOT_RUNNING':
+        shizukuColor = const Color(0xFFFF2A6D);
+        shizukuText = 'OFFLINE';
+        break;
+      default:
+        shizukuColor = const Color(0xFF64748B);
+        shizukuText = 'UNKNOWN';
+    }
+
+    final isArchOk = _deviceArch.contains('ARM64') || _deviceArch.contains('AARCH64') || _deviceArch.contains('MOCK');
+
+    return CyberCard(
+      borderGlowColors: const [Color(0xFF00FFCC), Color(0xFF0F172A)],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'ENVIRONMENT DIAGNOSTICS',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.5,
+                  color: Color(0xFF64748B),
+                ),
+              ),
+              Row(
+                children: [
+                  InkWell(
+                    onTap: () {
+                      showModalBottomSheet(
+                        context: context,
+                        isScrollControlled: true,
+                        backgroundColor: Colors.transparent,
+                        builder: (ctx) => const FractionallySizedBox(
+                          heightFactor: 0.75,
+                          child: SystemHudSheet(),
+                        ),
+                      );
+                    },
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.analytics_outlined, color: Color(0xFFBD00FF), size: 14),
+                        SizedBox(width: 4),
+                        Text(
+                          'HUD',
+                          style: TextStyle(color: Color(0xFFBD00FF), fontSize: 9, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  _isRunningDiagnostics
+                      ? const SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 1.5, color: Color(0xFF00FFCC)),
+                        )
+                      : InkWell(
+                          onTap: () => _runSystemDiagnostics(_activePresets),
+                          child: const Icon(Icons.refresh, color: Color(0xFF00FFCC), size: 16),
+                        ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          
+          Row(
+            children: [
+              Expanded(
+                child: _buildDiagBadge('ARCH', _deviceArch, isArchOk ? const Color(0xFF00FFCC) : const Color(0xFFFFCC00)),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildDiagBadge('ROOT LINK', _rootAvailable ? 'ROOTED' : 'NON-ROOT', _rootAvailable ? const Color(0xFF00FFCC) : const Color(0xFFBD00FF)),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildDiagBadge(
+                  'SHIZUKU',
+                  shizukuText,
+                  shizukuColor,
+                  onTap: _handleShizukuBadgeTap,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          
+          const Text(
+            'TARGET APK DIRECTORIES',
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1.0,
+              color: Color(0xFF475569),
+            ),
+          ),
+          const SizedBox(height: 10),
+          
+          _loadingPresets
+              ? const Center(child: Padding(padding: EdgeInsets.all(8.0), child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00FFCC))))
+              : ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _activePresets.length,
+                  itemBuilder: (ctx, idx) {
+                    final preset = _activePresets[idx];
+                    final isInstalled = _installedPresets[preset.package] ?? false;
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF030508),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFF1E293B), width: 1),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  preset.name.toUpperCase(),
+                                  style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: Colors.white),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  preset.package,
+                                  style: const TextStyle(fontSize: 8.5, color: Color(0xFF64748B), fontFamily: 'monospace'),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: isInstalled ? const Color(0xFF00FFCC).withAlpha(15) : const Color(0xFFFF2A6D).withAlpha(10),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: isInstalled ? const Color(0xFF00FFCC).withAlpha(60) : const Color(0xFFFF2A6D).withAlpha(30),
+                                width: 1,
+                              ),
+                            ),
+                            child: Text(
+                              isInstalled ? 'DETECTED' : 'MISSING',
+                              style: TextStyle(
+                                fontSize: 8,
+                                fontWeight: FontWeight.bold,
+                                color: isInstalled ? const Color(0xFF00FFCC) : const Color(0xFFFF2A6D),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDiagBadge(String title, String value, Color color, {VoidCallback? onTap}) {
+    final card = Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF030508),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF1E293B), width: 1.2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 8, color: Color(0xFF64748B), fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w900,
+                color: color,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (onTap != null) {
+      return Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: card,
+        ),
+      );
+    }
+    return card;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -470,6 +945,10 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
                       PulseIndicator(status: _serverLatencyMs != null ? 'ONLINE' : 'OFFLINE'),
                     ],
                   ),
+                  if (_latencyHistory.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    LatencySparkline(history: _latencyHistory),
+                  ],
                   const SizedBox(height: 16),
 
                   // UI Info Card
@@ -530,6 +1009,10 @@ class _UserKeyScreenState extends State<UserKeyScreen> {
                       ],
                     ),
                   ),
+                  const SizedBox(height: 20),
+
+                  // Diagnostics Dashboard Card
+                  _buildDiagnosticsCard(),
                   const SizedBox(height: 20),
 
                   // Deployment Stepper Card

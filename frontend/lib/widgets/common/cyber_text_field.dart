@@ -50,7 +50,7 @@ class _CyberTextFieldState extends State<CyberTextField> {
   Widget build(BuildContext context) {
     final bool isWidgetEnabled = widget.enabled;
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 250),
+      duration: const Duration(milliseconds: 200),
       decoration: BoxDecoration(
         color: isWidgetEnabled ? const Color(0xFF07090E) : const Color(0xFF030508),
         borderRadius: BorderRadius.circular(14),
@@ -62,7 +62,7 @@ class _CyberTextFieldState extends State<CyberTextField> {
             ? [
                 BoxShadow(
                   color: widget.focusColor.withAlpha((255 * 0.12).round()),
-                  blurRadius: 8,
+                  blurRadius: 10,
                   spreadRadius: 1,
                 )
               ]
@@ -83,13 +83,13 @@ class _CyberTextFieldState extends State<CyberTextField> {
           labelText: widget.label.toUpperCase(),
           labelStyle: TextStyle(
             color: _isFocused && isWidgetEnabled ? widget.focusColor : const Color(0xFF64748B),
-            fontSize: 10,
+            fontSize: 9.5,
             fontWeight: FontWeight.bold,
             letterSpacing: 1.2,
           ),
           hintText: widget.hintText,
           hintStyle: const TextStyle(color: Color(0xFF475569), fontSize: 13),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
           border: InputBorder.none,
           prefixIcon: widget.prefixIcon != null
               ? Icon(

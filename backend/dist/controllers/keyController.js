@@ -11,6 +11,7 @@ exports.toggleKeyStatus = toggleKeyStatus;
 exports.deactivateAllKeys = deactivateAllKeys;
 exports.pruneKeys = pruneKeys;
 exports.resetFingerprint = resetFingerprint;
+exports.updateKey = updateKey;
 const crypto_1 = __importDefault(require("crypto"));
 const Key_1 = __importDefault(require("../models/Key"));
 const User_1 = __importDefault(require("../models/User"));
@@ -231,5 +232,53 @@ async function resetFingerprint(req, res) {
     }
     catch (e) {
         res.status(500).json({ error: 'Failed to reset device fingerprint.' });
+    }
+}
+/**
+ * Admin-only: Update license key details.
+ */
+async function updateKey(req, res) {
+    const ip = req.ip || req.socket.remoteAddress;
+    try {
+        const { keyId } = req.params;
+        const { maxUses, expiresAt, targetGame, assignedTo } = req.body;
+        const keyDoc = await Key_1.default.findById(keyId);
+        if (!keyDoc) {
+            return res.status(404).json({ error: 'Access key not found.' });
+        }
+        const oldMaxUses = keyDoc.maxUses;
+        const oldTarget = keyDoc.targetGame;
+        const oldAssigned = keyDoc.assignedTo;
+        const oldExpires = keyDoc.expiresAt;
+        if (maxUses !== undefined) {
+            const parsedUses = parseInt(maxUses, 10);
+            if (!isNaN(parsedUses) && parsedUses >= 0) {
+                keyDoc.maxUses = parsedUses;
+            }
+        }
+        if (targetGame !== undefined) {
+            keyDoc.targetGame = targetGame.trim();
+        }
+        if (assignedTo !== undefined) {
+            keyDoc.assignedTo = assignedTo.trim();
+        }
+        if (expiresAt !== undefined) {
+            if (expiresAt === null || expiresAt === '') {
+                keyDoc.expiresAt = undefined;
+            }
+            else {
+                const parsedDate = new Date(expiresAt);
+                if (!isNaN(parsedDate.getTime())) {
+                    keyDoc.expiresAt = parsedDate;
+                }
+            }
+        }
+        await keyDoc.save();
+        await (0, Log_1.dbLog)('info', 'key', `Admin ${req.user?.username} updated key ${keyDoc.key}: Uses: ${oldMaxUses}->${keyDoc.maxUses}, Target: ${oldTarget}->${keyDoc.targetGame}, Assigned: ${oldAssigned}->${keyDoc.assignedTo}, Expiry: ${oldExpires ? oldExpires.toISOString() : 'Never'}->${keyDoc.expiresAt ? keyDoc.expiresAt.toISOString() : 'Never'}`, ip);
+        res.json({ success: true, message: 'Key updated successfully.', key: keyDoc });
+    }
+    catch (e) {
+        console.error('[Key] Edit Exception:', e);
+        res.status(500).json({ error: 'Failed to update access key settings.' });
     }
 }

@@ -3,6 +3,7 @@ import authRoutes from './authRoutes';
 import deployRoutes from './deployRoutes';
 import keyRoutes from './keyRoutes';
 import logRoutes from './logRoutes';
+import presetRoutes from './presetRoutes';
 
 const router = Router();
 
@@ -11,5 +12,6 @@ router.use('/', authRoutes);
 router.use('/', deployRoutes);
 router.use('/keys', keyRoutes);
 router.use('/logs', logRoutes);
+router.use('/presets', presetRoutes);
 
 export default router;

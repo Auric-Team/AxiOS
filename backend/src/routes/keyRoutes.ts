@@ -7,7 +7,8 @@ import {
   toggleKeyStatus,
   deactivateAllKeys,
   pruneKeys,
-  resetFingerprint
+  resetFingerprint,
+  updateKey
 } from '../controllers/keyController';
 import { requireAuth, requireAdmin } from '../middlewares/authMiddleware';
 
@@ -26,6 +27,7 @@ router.delete('/prune-inactive', requireAuth, requireAdmin, pruneKeys);
 
 // Parameterized routes
 router.delete('/:keyId', requireAuth, requireAdmin, deleteKey);
+router.patch('/:keyId', requireAuth, requireAdmin, updateKey);
 router.patch('/:keyId/status', requireAuth, requireAdmin, toggleKeyStatus);
 router.patch('/:keyId/reset-fingerprint', requireAuth, requireAdmin, resetFingerprint);
 

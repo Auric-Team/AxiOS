@@ -15,6 +15,22 @@ const defaultLibil2cppPath = path.join(config.uploadDir, 'libil2cpp.so');
  */
 export function getStatus(req: Request, res: Response) {
   const exists = fs.existsSync(defaultLibil2cppPath);
+  
+  // Scan payloads folder for custom profiles
+  const payloadProfiles: string[] = [];
+  const payloadsDir = path.join(config.uploadDir, 'payloads');
+  if (fs.existsSync(payloadsDir)) {
+    try {
+      const folders = fs.readdirSync(payloadsDir);
+      for (const folder of folders) {
+        const p = path.join(payloadsDir, folder, 'libil2cpp.so');
+        if (fs.existsSync(p)) {
+          payloadProfiles.push(folder);
+        }
+      }
+    } catch (_) {}
+  }
+
   res.json({
     status: 'online',
     message: 'AxiOS Deployment Backend is ready.',
@@ -27,6 +43,7 @@ export function getStatus(req: Request, res: Response) {
     system: getSystemInfo(),
     binaryExists: exists,
     binarySize: exists ? fs.statSync(defaultLibil2cppPath).size : 0,
+    payloadProfiles, // Array of package names that have custom binaries
     timestamp: new Date().toISOString()
   });
 }
@@ -94,24 +111,37 @@ export async function downloadBinary(req: Request, res: Response) {
       return res.status(403).json({ error: 'Access key usage limit exceeded.' });
     }
 
-    if (!fs.existsSync(defaultLibil2cppPath)) {
-      await dbLog('error', 'download', `Download failed: binary file not found on disk: ${defaultLibil2cppPath}`, ip, deviceInfo);
-      return res.status(404).json({ error: 'libil2cpp.so binary not found on server.' });
+    // Resolve dynamic payload binary location matching game target package
+    let binaryPath = defaultLibil2cppPath;
+    let isCustomPayload = false;
+
+    if (keyDoc.targetGame) {
+      const sanitizedGame = keyDoc.targetGame.replace(/[^a-zA-Z0-9._-]/g, '');
+      const customPath = path.join(config.uploadDir, 'payloads', sanitizedGame, 'libil2cpp.so');
+      if (fs.existsSync(customPath)) {
+        binaryPath = customPath;
+        isCustomPayload = true;
+      }
+    }
+
+    if (!fs.existsSync(binaryPath)) {
+      await dbLog('error', 'download', `Download failed: binary file not found on disk: ${binaryPath}`, ip, deviceInfo);
+      return res.status(404).json({ error: 'Payload binary not found on server.' });
     }
 
     if (config.logLevel === 'debug' || config.logLevel === 'info') {
-      console.log(`[Download] Streaming secure libil2cpp.so for key ${keyDoc.key} to client IP: ${ip}`);
+      console.log(`[Download] Streaming secure libil2cpp.so (custom: ${isCustomPayload}) for key ${keyDoc.key} to client IP: ${ip}`);
     }
 
     // Log the successful download
-    await dbLog('info', 'download', `Streaming libil2cpp.so payload for key: ${keyDoc.key} (User: ${keyDoc.assignedTo || 'Anonymous'})`, ip, deviceInfo);
+    await dbLog('info', 'download', `Streaming libil2cpp.so payload (${isCustomPayload ? 'Custom Profile: ' + keyDoc.targetGame : 'Global Default'}) for key: ${keyDoc.key} (User: ${keyDoc.assignedTo || 'Anonymous'})`, ip, deviceInfo);
 
-    const stats = fs.statSync(defaultLibil2cppPath);
+    const stats = fs.statSync(binaryPath);
     res.setHeader('Content-Length', stats.size.toString());
     res.setHeader('Content-Disposition', 'attachment; filename=libil2cpp.so');
     res.setHeader('Content-Type', 'application/octet-stream');
 
-    return res.sendFile(path.resolve(defaultLibil2cppPath));
+    return res.sendFile(path.resolve(binaryPath));
   } catch (err: any) {
     console.error('[Download] Exception:', err);
     return res.status(500).json({ error: `Internal Server Error during download: ${err.message || err}` });
@@ -120,7 +150,7 @@ export async function downloadBinary(req: Request, res: Response) {
 
 /**
  * Endpoint saving uploaded files to target uploads folders.
- * Automatically clears out the old binary if one exists.
+ * Automatically handles target profiles when ?targetGame query parameter is provided.
  */
 export async function uploadBinary(req: Request, res: Response) {
   if (!req.file) {
@@ -128,38 +158,39 @@ export async function uploadBinary(req: Request, res: Response) {
   }
 
   const fileDetails = req.file;
+  const targetGame = (req.query.targetGame as string || '').trim();
 
   try {
-    // If the diskStorage callback saved it as libil2cpp.so, it will have replaced it.
-    // However, to guarantee the old file is deleted and clean up space correctly,
-    // we double-check the default path.
-    if (fs.existsSync(defaultLibil2cppPath) && fileDetails.path !== defaultLibil2cppPath) {
-      fs.unlinkSync(defaultLibil2cppPath);
-    }
-
-    // Move the uploaded file to the default location if multer saved it differently
-    if (fileDetails.path !== defaultLibil2cppPath) {
-      fs.renameSync(fileDetails.path, defaultLibil2cppPath);
-    }
-
-    const ip = req.ip || req.socket.remoteAddress;
+    const ip = req.ip || req.socket?.remoteAddress || '127.0.0.1';
     const adminUser = (req as any).user?.username || 'admin';
     
-    // Import dynamically to avoid circular references if any
+    // Import dynamically to avoid circular references
     const { dbLog } = require('../models/Log');
-    await dbLog('info', 'binary', `Admin ${adminUser} uploaded and replaced libil2cpp.so file (${fileDetails.size} bytes)`, ip);
 
-    if (config.logLevel !== 'error') {
-      console.log(`[Upload] Successfully uploaded and replaced libil2cpp.so (${fileDetails.size} bytes)`);
+    if (targetGame) {
+      await dbLog('info', 'binary', `Admin ${adminUser} uploaded custom libil2cpp.so for profile ${targetGame} (${fileDetails.size} bytes)`, ip);
+      if (config.logLevel !== 'error') {
+        console.log(`[Upload] Successfully uploaded custom payload for ${targetGame} (${fileDetails.size} bytes)`);
+      }
+      res.json({
+        success: true,
+        message: `libil2cpp.so uploaded successfully for game profile: ${targetGame}`,
+        size: fileDetails.size,
+        targetGame
+      });
+    } else {
+      await dbLog('info', 'binary', `Admin ${adminUser} uploaded and replaced default global libil2cpp.so file (${fileDetails.size} bytes)`, ip);
+      if (config.logLevel !== 'error') {
+        console.log(`[Upload] Successfully uploaded default libil2cpp.so (${fileDetails.size} bytes)`);
+      }
+      res.json({
+        success: true,
+        message: 'Default global libil2cpp.so uploaded and updated successfully.',
+        size: fileDetails.size
+      });
     }
-
-    res.json({
-      success: true,
-      message: 'libil2cpp.so uploaded and updated successfully. Old file replaced.',
-      size: fileDetails.size
-    });
   } catch (err: any) {
-    console.error('[Upload] Error replacing binary:', err);
+    console.error('[Upload] Error processing binary upload:', err);
     res.status(500).json({ error: `Failed to update binary: ${err.message || err}` });
   }
 }

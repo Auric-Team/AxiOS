@@ -3,23 +3,53 @@ import Log from '../models/Log';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 
 /**
- * Admin-only: Fetch system logs with optional filtering.
+ * Admin-only: Fetch system logs with pagination and search filtering.
  */
 export async function getLogs(req: AuthenticatedRequest, res: Response) {
   try {
-    const { level, category, limit } = req.query;
+    const { level, category, page, limit, search } = req.query;
     
     const filter: any = {};
-    if (level) filter.level = level;
-    if (category) filter.category = category;
+    
+    if (level && level !== 'ALL') {
+      filter.level = level;
+    }
+    
+    if (category && category !== 'ALL') {
+      filter.category = category;
+    }
 
-    const limitVal = parseInt((limit as string) || '100', 10);
+    if (search) {
+      const searchStr = (search as string).trim();
+      const escapedSearch = searchStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const searchRegex = new RegExp(escapedSearch, 'i');
+      filter.$or = [
+        { message: searchRegex },
+        { ip: searchRegex },
+        { deviceInfo: searchRegex }
+      ];
+    }
 
+    const pageVal = parseInt((page as string) || '1', 10);
+    const limitVal = parseInt((limit as string) || '50', 10);
+    const skipVal = (pageVal - 1) * limitVal;
+
+    const total = await Log.countDocuments(filter);
     const logs = await Log.find(filter)
       .sort({ timestamp: -1 })
+      .skip(skipVal)
       .limit(limitVal);
 
-    res.json({ success: true, logs });
+    res.json({
+      success: true,
+      logs,
+      pagination: {
+        total,
+        page: pageVal,
+        limit: limitVal,
+        pages: Math.ceil(total / limitVal)
+      }
+    });
   } catch (e: any) {
     res.status(500).json({ error: 'Failed to fetch logs.' });
   }

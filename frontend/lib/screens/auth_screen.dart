@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import '../services/config_service.dart';
 import '../services/download_service.dart';
-import '../widgets/cyber_card.dart';
-import '../widgets/cyber_button.dart';
-import '../widgets/cyber_text_field.dart';
+import '../widgets/common/cyber_card.dart';
+import '../widgets/common/cyber_button.dart';
+import '../widgets/common/cyber_text_field.dart';
 import 'admin/admin_dashboard_screen.dart';
 import 'user_key_screen.dart';
 

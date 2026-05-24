@@ -14,6 +14,7 @@ router.patch('/deactivate-all', authMiddleware_1.requireAuth, authMiddleware_1.r
 router.delete('/prune-inactive', authMiddleware_1.requireAuth, authMiddleware_1.requireAdmin, keyController_1.pruneKeys);
 // Parameterized routes
 router.delete('/:keyId', authMiddleware_1.requireAuth, authMiddleware_1.requireAdmin, keyController_1.deleteKey);
+router.patch('/:keyId', authMiddleware_1.requireAuth, authMiddleware_1.requireAdmin, keyController_1.updateKey);
 router.patch('/:keyId/status', authMiddleware_1.requireAuth, authMiddleware_1.requireAdmin, keyController_1.toggleKeyStatus);
 router.patch('/:keyId/reset-fingerprint', authMiddleware_1.requireAuth, authMiddleware_1.requireAdmin, keyController_1.resetFingerprint);
 exports.default = router;
